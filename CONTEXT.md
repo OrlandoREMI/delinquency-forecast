@@ -378,3 +378,172 @@ Environment name: `geomod` (Python 3.11). Key packages:
 - `pandas`, `numpy`, `scikit-learn`
 
 Install: `conda env create -f environment.yml` (file not yet exported — see pending work).
+
+---
+
+## 16. Stage 3 — Crime Composition Model (`lgbm_e3_v1.pkl`)
+
+Stage 3 answers a different question from Stages 1 and 2: not *how many* crimes, but *what kind*. Given that a crime occurs in cell H3 on day D, what category is it most likely to be?
+
+### 16.1 Four crime categories
+
+| Category | Crimes included |
+|---|---|
+| `alto_impacto` | Homicidio doloso, Feminicidio, Violación |
+| `violencia_personal` | Violencia familiar, Lesiones dolosas, Abuso sexual infantil |
+| `robo_confrontacion` | Robo a persona, Robo a negocio, Robo a cuentahabientes, Robo a bancos |
+| `robo_patrimonial` | Robo a vehículos, Robo de motocicleta, Robo a int. de vehículos, Robo de autopartes, Robo a casa habitación, Robo a carga pesada |
+
+Crimes not matching any category are excluded from training (none were found in the 2017–2025 data).
+
+### 16.2 Model design
+
+- **Algorithm**: LightGBM `multiclass` with softmax output, 4 classes
+- **Training unit**: individual incident (one row per crime in `iieg_unified.parquet` with valid H3), not a cell-day panel
+- **Output**: probability vector [P(alto_impacto), P(violencia_personal), P(robo_confrontacion), P(robo_patrimonial)], sums to 1
+- **Class imbalance**: `alto_impacto` represents 3.3% of incidents. Addressed with square-root sample weights (`np.sqrt(compute_sample_weight("balanced", y_train))`), which is a middle ground between unweighted (recall ≈ 1%) and fully balanced (recall ≈ 42% but accuracy drops to 45%)
+
+### 16.3 Training split (incident-level)
+
+| Set | Period | Incidents |
+|---|---|---|
+| Train | ≤ 2023 | 511,735 |
+| Val | 2024 | 55,627 |
+| Test | 2025 | 30,909 |
+
+### 16.4 Features (51 total)
+
+**Inherited from Stage 2** (same cell, same day):
+- `log_lam_dia_base`, `dia_semana`, `es_fin_semana`, `es_festivo`, `mes`
+- `lag_1`, `lag_7`, `lag_14`, `rolling_mean_7`, `rolling_mean_14`, `rolling_std_7`
+- `nr_ring1_1d`, `nr_ring1_7d`, `nr_ring1_14d`, `nr_ring2_7d`
+- `zona_geografica`, `clave_mun`
+- `lambda_diario` — Stage 2 prediction for that cell-day (most important feature)
+
+**POIs from DENUE** (static per H3 cell, 9 categories):
+- `poi_bancos`, `poi_bares`, `poi_escuelas`, `poi_salud`, `poi_conveniencia`
+- `poi_hoteles`, `poi_gasolineras`, `poi_mercados`, `poi_farmacias`
+- `poi_total` (sum of all POI counts)
+- Binary flags (`poi_*_flag`) were removed after analysis showed gain < 5K — redundant with counts
+
+**Infrastructure from INEGI INV 2020** (13 proportions per H3 cell):
+- `inv_banqueta_pct`, `inv_alumpub_pct`, `inv_drenajep_pct`, `inv_transcol_pct`
+- `inv_semapeat_pct`, `inv_paratran_pct`, `inv_rampas_pct`, `inv_pasopeat_pct`
+- `inv_ciclovia_pct`, `inv_puestosf_pct`, `inv_puestoam_pct`, `inv_arboles_pct`, `inv_guarnici_pct`
+- `inv_n_segmentos` (street segment count as coverage proxy)
+
+**Category-specific near-repeat features** (8 features):
+- `nr_cat_{alto,viol,conf,patr}_ring1_{7,14}d`: crime count in ring-1 neighbors in the past 7/14 days, broken down by crime category
+- Hypothesis: crime contagion is species-specific — a violent incident yesterday is a better predictor of today's violence than a vehicle theft
+- In practice, these features did not appear in the top 20 by gain, suggesting the global near-repeat features already capture most of the spatial contagion signal
+
+### 16.5 Hyperparameters
+
+```python
+objective         = "multiclass"
+num_class         = 4
+metric            = "multi_logloss"
+num_leaves        = 63
+learning_rate     = 0.05
+min_child_samples = 50
+feature_fraction  = 0.8
+bagging_fraction  = 0.8
+bagging_freq      = 5
+reg_alpha         = 0.1
+reg_lambda        = 0.1
+num_boost_round   = 500    # early stopping patience = 50; best_iteration = 490
+```
+
+### 16.6 Post-training calibration and threshold optimization
+
+**Isotonic calibration**: A separate `IsotonicRegression` is fitted one-vs-rest for each of the 4 classes on the validation set (2024). This significantly improves probability calibration measured by Expected Calibration Error (ECE):
+
+| Class | ECE before | ECE after |
+|---|---|---|
+| alto_impacto | 0.060 | 0.0015 |
+| violencia_personal | 0.044 | 0.0028 |
+| robo_confrontacion | 0.051 | 0.0062 |
+| robo_patrimonial | 0.089 | 0.0095 |
+
+**Threshold optimization**: Per-class multipliers are optimized via Nelder-Mead on the calibrated validation probabilities to maximize macro-F1. The multipliers are applied at inference time as `(probs * thresholds).argmax(axis=1)`.
+
+### 16.7 Evaluation results (Test 2025)
+
+| Class | Precision | Recall | F1 | Support |
+|---|---|---|---|---|
+| alto_impacto | — | 12% | 0.12 | 1,012 |
+| violencia_personal | — | — | 0.37 | 5,465 |
+| robo_confrontacion | — | — | 0.38 | 8,162 |
+| robo_patrimonial | — | — | 0.67 | 16,270 |
+| **macro avg** | — | — | **0.38** | 30,909 |
+
+Accuracy: **55%** | Log-loss (calibrated): **1.017**
+
+Confusion matrix — TEST 2025:
+
+```
+                      alto_imp  viol_pers  robo_conf  robo_patr
+alto_impacto  (1,012)      119        145        162        586
+viol_personal (5,465)      104      2,045      1,497      1,819
+robo_confron. (8,162)      267      1,533      2,921      3,441
+robo_patrimon(16,270)      513      1,921      2,684     11,152
+```
+
+Top features by gain: `lambda_diario` (407K), `log_lam_dia_base` (167K), `poi_conveniencia` (149K), `zona_geografica` (92K), `inv_n_segmentos` (83K).
+
+### 16.8 Auxiliary data processing scripts
+
+| Script | Input | Output |
+|---|---|---|
+| `src/crime_composition/01_build_denue_h3.py` | DENUE 2025 ZIP | `data/processed/denue_h3.parquet` (13,009 cells × 20 cols) |
+| `src/crime_composition/02_build_inv_h3.py` | INEGI INV 2020 national ZIP | `data/processed/inegi_inv_h3.parquet` (14,372 cells × 15 cols) |
+| `src/crime_composition/03_train_e3.py` | all of the above + E2 model | `models/lgbm_e3_v1.pkl` |
+
+**DENUE processing**: POI establishments matched by SCIAN code prefix (e.g., `"522"` = banks, `"7224"` = bars). State 14 (Jalisco) only. Output is count of establishments per H3 cell per category.
+
+**INV processing**: National shapefile extracted for state 14. Street segment LINESTRING geometries reprojected from ITRF2008 Lambert Conformal Conic to WGS84, centroid mapped to H3 res=9. Infrastructure columns (binary: 1=available, 3=not available) aggregated as proportions per cell.
+
+### 16.9 Artifact
+
+```
+models/lgbm_e3_v1.pkl   # 13.9 MB
+  keys: model, feature_cols, classes, label_encoder, calibrators, thresholds
+
+data/processed/
+  denue_h3.parquet       # 13,009 rows × 20 cols (9 POI counts + poi_total + 9 flags + h3_9)
+  inegi_inv_h3.parquet   # 14,372 rows × 15 cols (13 infrastructure pct + inv_n_segmentos + h3_9)
+```
+
+---
+
+## 17. Interactive Visualization (Gradio App)
+
+The three model stages are exposed through a Gradio web application (`app.py`) with a Folium interactive map.
+
+### 17.1 Inputs
+
+- **Date**: any date from 2017-01-01 onwards. Dates within the historical range (≤ 2025-12-30) use real features from `features_daily.parquet`. Dates beyond that use synthetic features generated from the historical monthly average of the same calendar month in the most recent reference year (2024).
+- **Search**: municipality name, neighborhood (geocoded via Nominatim), or direct H3 index. Defaults to Guadalajara.
+
+### 17.2 Map output
+
+Each active H3 cell is rendered as a hexagonal polygon colored on a 5-tone traffic-light palette (green → red) proportional to `lambda_diario` (percentile 10 = min, percentile 95 = max). Hovering a cell shows:
+- λ_diario value and risk level (bajo / medio / alto)
+- Most probable crime category (Stage 3 prediction)
+- Proportional bar of the four category probabilities
+- Reliability score (0–100)
+
+Up to 1,500 cells are rendered per query (top by λ_diario) to maintain browser performance.
+
+### 17.3 Reliability score for future dates
+
+For historical dates, reliability reflects data coverage (POI availability, infrastructure data, crime history depth). For future dates, the primary uncertainty source is that lag features and near-repeat counts are replaced with historical monthly averages — not actual recent observations. The penalty is therefore based on distance from the last real data point (2025-12-30), not from today:
+
+| Distance from last data | Penalty | Typical score |
+|---|---|---|
+| 0 (historical) | 0 pts | ~99/100 |
+| 1–31 days beyond data | −25 pts | ~65–75/100 |
+| 32–180 days beyond data | −35 pts | ~55–65/100 |
+| > 180 days beyond data | −45 pts | ~45–55/100 |
+
+A banner is displayed when the selected date is outside the historical range, showing how many days beyond the last data point the prediction is and indicating whether it is a near-term forecast or a speculative projection.
