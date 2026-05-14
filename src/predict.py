@@ -135,7 +135,44 @@ def build_monthly_feature_vector(
     return np.array([features[c] for c in feature_cols]).reshape(1, -1)
 
 
+def _near_repeat_sums(
+    h3_index: str,
+    target_date: pd.Timestamp,
+) -> dict:
+    """Carga el historial de celdas vecinas y calcula sumas near-repeat."""
+    ring1 = [nb for nb in h3.grid_disk(h3_index, 1) if nb != h3_index]
+    ring2 = list(h3.grid_ring(h3_index, 2))
+    all_nb = ring1 + ring2
+
+    cutoff = target_date - pd.Timedelta(days=14)
+    try:
+        nb_hist = pd.read_parquet(
+            HISTORY_DAILY,
+            filters=[("h3_9", "in", all_nb)],
+            columns=["h3_9", "fecha", "conteo"],
+        )
+        nb_hist["fecha"] = pd.to_datetime(nb_hist["fecha"])
+        nb_hist = nb_hist[
+            (nb_hist["fecha"] >= cutoff) & (nb_hist["fecha"] < target_date)
+        ]
+    except Exception:
+        nb_hist = pd.DataFrame(columns=["h3_9", "fecha", "conteo"])
+
+    def nb_sum(cells, days):
+        cutoff_d = target_date - pd.Timedelta(days=days)
+        s = nb_hist[nb_hist["h3_9"].isin(cells) & (nb_hist["fecha"] >= cutoff_d)]
+        return float(s["conteo"].sum())
+
+    return {
+        "nr_ring1_1d":  nb_sum(ring1, 1),
+        "nr_ring1_7d":  nb_sum(ring1, 7),
+        "nr_ring1_14d": nb_sum(ring1, 14),
+        "nr_ring2_7d":  nb_sum(ring2, 7),
+    }
+
+
 def build_daily_feature_vector(
+    h3_index: str,
     target_date: pd.Timestamp,
     monthly_lam: float,
     daily_history: pd.DataFrame,
@@ -145,7 +182,7 @@ def build_daily_feature_vector(
     days_in_month = target_date.days_in_month
     log_lam_dia_base = np.log(max(monthly_lam / days_in_month, 1e-6))
 
-    dia_semana   = target_date.dayofweek
+    dia_semana    = target_date.dayofweek
     es_fin_semana = int(dia_semana >= 5)
     es_festivo    = int(target_date.date() in _get_holidays())
     mes = target_date.month
@@ -176,6 +213,8 @@ def build_daily_feature_vector(
     else:
         zona = clave_mun = 0
 
+    nr = _near_repeat_sums(h3_index, target_date)
+
     features = {
         "log_lam_dia_base": log_lam_dia_base,
         "dia_semana":    dia_semana,
@@ -190,6 +229,7 @@ def build_daily_feature_vector(
         "rolling_std_7":   rolling_daily_std(7),
         "zona_geografica": zona,
         "clave_mun":       clave_mun,
+        **nr,
     }
     return np.array([features[c] for c in feature_cols]).reshape(1, -1)
 
@@ -362,7 +402,7 @@ def predict_daily(
     daily_history["fecha"] = pd.to_datetime(daily_history["fecha"])
 
     X_day = build_daily_feature_vector(
-        target_date, lam_m, daily_history, encoders, daily_feat_cols
+        h3_index, target_date, lam_m, daily_history, encoders, daily_feat_cols
     )
     lam_day = float(np.clip(daily_model.predict(X_day)[0], 0, None))
 

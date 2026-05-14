@@ -31,6 +31,8 @@ FEATURE_COLS_DAILY = [
     "rolling_mean_7", "rolling_mean_14",
     "rolling_std_7",
     "zona_geografica", "clave_mun",
+    "nr_ring1_1d", "nr_ring1_7d", "nr_ring1_14d",
+    "nr_ring2_7d",
 ]
 
 MIN_CRIMES_TRAIN = 10   # crímenes mínimos en período de entrenamiento para incluir la celda
@@ -77,11 +79,16 @@ def main():
     print(f"  Test:           {len(test_df):,} filas")
 
     X_train = train_df[FEATURE_COLS_DAILY].values.astype(np.float32)
-    y_train = train_df["conteo"].values.astype(float)
     X_val   = val_df[FEATURE_COLS_DAILY].values.astype(np.float32)
-    y_val   = val_df["conteo"].values.astype(float)
     X_test  = test_df[FEATURE_COLS_DAILY].values.astype(np.float32)
-    y_test  = test_df["conteo"].values.astype(float)
+
+    # Entrenamiento y early-stopping sobre target suavizado
+    y_train_smooth = train_df["target_smoothed"].values.astype(float)
+    y_val_smooth   = val_df["target_smoothed"].values.astype(float)
+
+    # Evaluación siempre sobre delitos reales
+    y_val_real  = val_df["conteo"].values.astype(float)
+    y_test_real = test_df["conteo"].values.astype(float)
 
     params = {
         "objective": "poisson",
@@ -100,8 +107,8 @@ def main():
     }
 
     print("\nEntrenando LightGBM diario (poisson)...")
-    dtrain = lgb.Dataset(X_train, label=y_train, feature_name=FEATURE_COLS_DAILY)
-    dval   = lgb.Dataset(X_val,   label=y_val,   reference=dtrain)
+    dtrain = lgb.Dataset(X_train, label=y_train_smooth, feature_name=FEATURE_COLS_DAILY)
+    dval   = lgb.Dataset(X_val,   label=y_val_smooth,   reference=dtrain)
 
     callbacks = [
         lgb.early_stopping(stopping_rounds=50, verbose=False),
@@ -123,8 +130,8 @@ def main():
     pred_test = np.clip(model.predict(X_test), 0, None)
 
     print("\nMétricas globales:")
-    evaluate(y_val,  pred_val,  "Val  (2024)")
-    evaluate(y_test, pred_test, "Test (2025)")
+    evaluate(y_val_real,  pred_val,  "Val  (2024)")
+    evaluate(y_test_real, pred_test, "Test (2025)")
 
     # Métricas por zona geográfica (solo val)
     if "zona_geografica" in val_df.columns:
@@ -135,7 +142,7 @@ def main():
                 zona_name = encoders["zona_geografica"].inverse_transform([zona_code])[0]
             except Exception:
                 zona_name = str(zona_code)
-            evaluate(y_val[mask], pred_val[mask], zona_name)
+            evaluate(y_val_real[mask], pred_val[mask], zona_name)
 
     # Métricas por día de la semana (val)
     print("\nMétricas val (2024) por día de la semana:")
@@ -143,7 +150,7 @@ def main():
     for d in range(7):
         mask = val_df["dia_semana"].values == d
         if mask.sum() > 0:
-            evaluate(y_val[mask], pred_val[mask], dias[d])
+            evaluate(y_val_real[mask], pred_val[mask], dias[d])
 
     # Importancia de features
     print("\nImportancia de features (gain):")

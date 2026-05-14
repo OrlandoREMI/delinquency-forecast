@@ -7,17 +7,20 @@ Features clave:
   - lag_1, lag_7, lag_14 : conteos en días previos
   - rolling_mean_7, rolling_mean_14, rolling_std_7
   - zona_geografica, clave_mun (codificados con encoders del modelo mensual)
+  - nr_ring1_1d/7d/14d, nr_ring2_7d : near-repeat (crímenes en celdas vecinas)
 
-Usa operaciones matriciales vectorizadas para los lags y rolling stats:
-el panel diario se reshapea a (n_h3, n_fechas) para operar con numpy puro
-en lugar de groupby + transform, reduciendo el tiempo de cómputo ~10×.
+Los lags, rolling y near-repeat se calculan con operaciones matriciales
+vectorizadas sobre la matriz (n_h3, n_fechas), usando scipy.sparse para
+el componente espacial (multiplicación matriz de adyacencia × rolling sum).
 
-Memoria estimada: 4–6 GB RAM durante la ejecución.
+Memoria estimada: 5–8 GB RAM durante la ejecución.
 """
 import pickle
 from pathlib import Path
 
+import h3 as h3lib
 import holidays as hol_lib
+import scipy.sparse as sp
 import numpy as np
 import pandas as pd
 
@@ -35,6 +38,8 @@ FEATURE_COLS_DAILY = [
     "rolling_mean_7", "rolling_mean_14",
     "rolling_std_7",
     "zona_geografica", "clave_mun",
+    "nr_ring1_1d", "nr_ring1_7d", "nr_ring1_14d",
+    "nr_ring2_7d",
 ]
 
 CAT_ENCODE = ["zona_geografica", "region", "trimestre", "clave_mun"]
@@ -172,6 +177,63 @@ def main():
 
     panel["rolling_std_7"] = causal_rolling_std(shifted, 7).ravel()
     print("  rolling_std_7 ✓")
+
+    # ── Near-repeat features (contagiosidad espacial-temporal) ───────────────
+    print("Construyendo matrices de adyacencia H3...")
+    h3_to_idx = {cell: i for i, cell in enumerate(all_h3_ordered)}
+
+    rows1, cols1, rows2, cols2 = [], [], [], []
+    for i, cell in enumerate(all_h3_ordered):
+        for nb in h3lib.grid_disk(cell, 1):
+            if nb != cell and nb in h3_to_idx:
+                rows1.append(i); cols1.append(h3_to_idx[nb])
+        for nb in h3lib.grid_ring(cell, 2):
+            if nb in h3_to_idx:
+                rows2.append(i); cols2.append(h3_to_idx[nb])
+
+    A1 = sp.csr_matrix(
+        (np.ones(len(rows1), dtype=np.float32), (rows1, cols1)), shape=(n_h3, n_h3)
+    )
+    A2 = sp.csr_matrix(
+        (np.ones(len(rows2), dtype=np.float32), (rows2, cols2)), shape=(n_h3, n_h3)
+    )
+    print(f"  Ring-1: {len(rows1):,} conexiones  |  Ring-2: {len(rows2):,} conexiones")
+
+    def causal_rolling_sum(mat, window):
+        n_r, n_c = mat.shape
+        s = np.zeros_like(mat, dtype=np.float32)
+        s[:, 1:] = mat[:, :-1]
+        cs = np.zeros((n_r, n_c + 1), dtype=np.float64)
+        cs[:, 1:] = np.cumsum(s.astype(np.float64), axis=1)
+        j = np.arange(n_c)
+        return (cs[:, j + 1] - cs[:, np.maximum(0, j + 1 - window)]).astype(np.float32)
+
+    rsum1  = causal_rolling_sum(conteo_mat, 1)
+    rsum7  = causal_rolling_sum(conteo_mat, 7)
+    rsum14 = causal_rolling_sum(conteo_mat, 14)
+
+    panel["nr_ring1_1d"]  = (A1 @ rsum1).ravel();  print("  nr_ring1_1d ✓")
+    panel["nr_ring1_7d"]  = (A1 @ rsum7).ravel();  print("  nr_ring1_7d ✓")
+    panel["nr_ring1_14d"] = (A1 @ rsum14).ravel(); print("  nr_ring1_14d ✓")
+    panel["nr_ring2_7d"]  = (A2 @ rsum7).ravel();  print("  nr_ring2_7d ✓")
+
+    del rsum1, rsum7, rsum14, A2
+
+    # ── Target smoothing 60/40 ────────────────────────────────────────────────
+    # Cada crimen en celda i distribuye: 60% a i, 40% a partes iguales entre
+    # sus 6 vecinos (0.40/6 cada uno). Compensa ruido de geocodificación en res=9.
+    print("Calculando target_smoothed (kernel 60/40)...")
+    c_mat = conteo_mat.astype(np.float32)
+    smoothed_mat = 0.60 * c_mat + (0.40 / 6.0) * (A1 @ c_mat)
+    panel["target_smoothed"] = smoothed_mat.ravel()
+    del smoothed_mat, c_mat, A1
+
+    mass_orig   = float(panel["conteo"].sum())
+    mass_smooth = float(panel["target_smoothed"].sum())
+    diff_pct    = abs(mass_orig - mass_smooth) / mass_orig * 100
+    print(f"  Masa original:  {mass_orig:,.0f}")
+    print(f"  Masa suavizada: {mass_smooth:,.2f}")
+    print(f"  Diferencia:     {diff_pct:.4f}%  (solo celdas en borde de Jalisco)")
 
     del conteo_mat, shifted
 
