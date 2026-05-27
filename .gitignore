@@ -66,6 +66,12 @@ db.sqlite3-journal
 instance/
 .webassets-cache
 
+# Claude stuff
+.claude/
+CLAUDE.md
+CONTEXT.md
+recommendations.md
+
 # Scrapy stuff:
 .scrapy
 
@@ -226,4 +232,5 @@ models/*
 !data/.gitkeep
 !models/.gitkeep
 
-.claude/
+.gradio/
+.vscode/
