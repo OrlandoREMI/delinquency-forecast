@@ -522,28 +522,98 @@ The three model stages are exposed through a Gradio web application (`app.py`) w
 
 ### 17.1 Inputs
 
-- **Date**: any date from 2017-01-01 onwards. Dates within the historical range (≤ 2025-12-30) use real features from `features_daily.parquet`. Dates beyond that use synthetic features generated from the historical monthly average of the same calendar month in the most recent reference year (2024).
+- **Date**: any date. Dates ≤ 2025-12-30 use real precomputed features from `features_daily.parquet`. Future dates use synthetic features from the historical monthly average of the same calendar month in 2024 (the most recent reference year).
 - **Search**: municipality name, neighborhood (geocoded via Nominatim), or direct H3 index. Defaults to Guadalajara.
 
-### 17.2 Map output
+### 17.2 Map
 
-Each active H3 cell is rendered as a hexagonal polygon colored on a 5-tone traffic-light palette (green → red) proportional to `lambda_diario` (percentile 10 = min, percentile 95 = max). Hovering a cell shows:
-- λ_diario value and risk level (bajo / medio / alto)
-- Most probable crime category (Stage 3 prediction)
-- Proportional bar of the four category probabilities
-- Reliability score (0–100)
+- **Tiles**: CartoDB Positron (light theme)
+- **Cells**: H3 hexagonal polygons, `fillOpacity = 0.55`
+- **Color palette**: 5-tone traffic-light (green → red), relative to the current view
+- **Max cells rendered**: 1,500 (top by λ_diario) for browser performance
 
-Up to 1,500 cells are rendered per query (top by λ_diario) to maintain browser performance.
+### 17.3 Tooltip content (current version)
 
-### 17.3 Reliability score for future dates
+Each cell on hover shows:
 
-For historical dates, reliability reflects data coverage (POI availability, infrastructure data, crime history depth). For future dates, the primary uncertainty source is that lag features and near-repeat counts are replaced with historical monthly averages — not actual recent observations. The penalty is therefore based on distance from the last real data point (2025-12-30), not from today:
-
-| Distance from last data | Penalty | Typical score |
+| Field | Value | Source |
 |---|---|---|
-| 0 (historical) | 0 pts | ~99/100 |
-| 1–31 days beyond data | −25 pts | ~65–75/100 |
-| 32–180 days beyond data | −35 pts | ~55–65/100 |
-| > 180 days beyond data | −45 pts | ~45–55/100 |
+| Municipality | Name string | `iieg_unified` join |
+| H3 index | Hex string | spatial index |
+| Risk index | 1–99 · label (e.g. `87/99 — Muy alto`) | relative percentile of λ |
+| Note | "Relativo a celdas del día en esta vista · λ = X.XXXX" | |
+| Probable type | Most likely crime category | Stage 3 argmax |
+| Composition bar | Proportional bar of 4 category probabilities | Stage 3 softmax |
+| Category legend | Color-coded % per class | Stage 3 |
+| Reliability | Score 0–100 | see §17.5 |
 
-A banner is displayed when the selected date is outside the historical range, showing how many days beyond the last data point the prediction is and indicating whether it is a near-term forecast or a speculative projection.
+### 17.4 Risk index design — decisions and alternatives explored
+
+The risk signal went through several design iterations. The decision history matters because the alternatives are already implemented and can be reactivated.
+
+#### Current implementation: relative index 1–99
+
+```python
+# app.py — lam_to_risk()
+t = max(0.0, min(1.0, (lam - vmin) / (vmax - vmin)))  # vmin=p10, vmax=p95 of view
+idx = min(int(t * 5), 4)          # → palette bin [0..4]
+score = min(int(round(t * 100)), 99)  # → 1-99
+label = RISK_LABELS[idx]          # Muy bajo / Bajo / Medio / Alto / Muy alto
+```
+
+Color, label, and score all derive from the same `t`, so they are always mutually consistent. The score is capped at 99 (never 100) to avoid the false impression of certainty.
+
+**Why relative**: maximizes visual discrimination across any view. Always shows meaningful variation between cells regardless of the absolute crime rate of the area.
+
+**Known limitation**: the label is relative to the current view, not absolute. A cell labeled "Muy alto" in a quiet municipality may have lower absolute risk than a "Bajo" cell in the city center.
+
+#### Alternative explored: Poisson probability (not active in UI)
+
+`batch_predict.py` computes `prob_crimen` in all cases:
+
+```python
+df["prob_crimen"] = (1 - np.exp(-df["lambda_diario"].clip(lower=0))) * 100
+```
+
+This is the statistically correct interpretation: P(≥1 crime reported in this cell today), valid under the Poisson assumption of Stage 2. It is returned in the DataFrame but not displayed in the current UI.
+
+An absolute color palette was implemented alongside it:
+
+```python
+# app.py — prob_to_risk() [inactive]
+PROB_THRESHOLDS = [1.0, 3.0, 7.0, 15.0]  # %
+# < 1%   → Muy bajo (green)
+# 1–3%   → Bajo
+# 3–7%   → Medio
+# 7–15%  → Alto
+# > 15%  → Muy alto (red)
+```
+
+**Why discarded for presentations**: the most active cells in Guadalajara reach P ≈ 7–13%, so the map renders almost entirely green with no red. Operationally correct but visually poor for client demos. Reserved for technical/analytical use.
+
+**Reactivation**: replace `lam_to_risk` with `prob_to_risk` in `build_folium_map`, and update `build_tooltip` signature accordingly.
+
+#### Earlier issue: color/label inconsistency (fixed)
+
+The original implementation used a 5-bin relative palette for color but a separate 3-level model output (`nivel_riesgo`: bajo/medio/alto based on p33/p66 of positive λ values) for the tooltip label. These used different scales and were frequently inconsistent — a yellow cell might show "Alto" and a red cell might show "Medio". Fixed by deriving both color and label from the same `t`.
+
+### 17.5 Reliability score
+
+Base score 70, up to +30 from data coverage:
+
+| Condition | Bonus |
+|---|---|
+| POI data available (poi_total > 0) | +10 |
+| INV data available (inv_n_segmentos > 0) | +10 |
+| Cell has crime history (log_lam_dia_base > −5) | +10 |
+
+Penalty for predictions beyond historical data (DATA_END = 2025-12-30):
+
+| Distance from DATA_END | Penalty | Typical score |
+|---|---|---|
+| 0 — historical date | 0 | ~99/100 |
+| 1–31 days | −25 | ~65–75/100 |
+| 32–180 days | −35 | ~55–65/100 |
+| > 180 days | −45 | ~45–55/100 |
+
+A warning banner is shown for future dates indicating days beyond DATA_END and whether the prediction is a near-term forecast or speculative projection.
