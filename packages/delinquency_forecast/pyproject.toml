@@ -15,10 +15,10 @@ dependencies = [
     "h3>=3.7",
     "holidays>=0.40",
     "scikit-learn>=1.3",
+    "sqlalchemy>=2.0",
 ]
 
 [project.optional-dependencies]
-db  = ["sqlalchemy>=2.0"]
 dev = ["pytest>=7.0", "pytest-cov"]
 
 [tool.setuptools.packages.find]

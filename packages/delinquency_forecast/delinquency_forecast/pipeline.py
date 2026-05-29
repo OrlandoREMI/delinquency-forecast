@@ -147,19 +147,25 @@ class DelinquencyPipeline:
             out[f"p_{cls}"] = probs[:, i]
 
         out["categoria_pred"] = self._e3.predict_classes(probs)
-        out["nivel_riesgo"]   = _nivel_riesgo(lambda_daily)
+        out["nivel_riesgo"], out["color_riesgo"] = _nivel_riesgo(lambda_daily)
         out["confiabilidad_score"] = builder.confidence_score(e3_df, ts, data_end)
 
         return out[OUTPUT_COLS]
 
 
-def _nivel_riesgo(lam: np.ndarray) -> list[str]:
+_NIVELES = ["muy_bajo", "bajo", "medio", "alto", "muy_alto"]
+_COLORES  = ["#1a9641", "#a6d96a", "#ffffbf", "#fdae61", "#d7191c"]
+
+def _nivel_riesgo(lam: np.ndarray) -> tuple[list[str], list[str]]:
     pos = lam[lam > 0]
     if len(pos) == 0:
-        p33, p66 = 1.0, 3.0
+        cuts = [0.2, 0.4, 0.6, 0.8]
     else:
-        p33, p66 = np.percentile(pos, [33, 66])
-    return [
-        "bajo" if v <= p33 else "medio" if v <= p66 else "alto"
-        for v in lam
-    ]
+        cuts = np.percentile(pos, [20, 40, 60, 80]).tolist()
+
+    niveles, colores = [], []
+    for v in lam:
+        idx = sum(v > c for c in cuts)
+        niveles.append(_NIVELES[idx])
+        colores.append(_COLORES[idx])
+    return niveles, colores

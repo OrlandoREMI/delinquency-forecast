@@ -75,7 +75,7 @@ OUTPUT_COLS = [
     "lambda_diario", "prob_crimen",
     "p_alto_impacto", "p_violencia_personal",
     "p_robo_confrontacion", "p_robo_patrimonial",
-    "categoria_pred", "nivel_riesgo", "confiabilidad_score",
+    "categoria_pred", "nivel_riesgo", "color_riesgo", "confiabilidad_score",
 ]
 
 POI_COLS = [

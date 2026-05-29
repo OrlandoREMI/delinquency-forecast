@@ -6,19 +6,9 @@ Pipeline de predicción espaciotemporal de incidencia delictiva para Jalisco. Da
 
 ## Instalación
 
-**Desde el repositorio (recomendado):**
+**Desde el repositorio:**
 ```bash
 pip install "git+https://github.com/seigpol/delinquency-forecast.git#subdirectory=packages/delinquency_forecast"
-```
-
-**Con soporte para `PostgresLoader`:**
-```bash
-pip install "git+...#subdirectory=packages/delinquency_forecast[db]"
-```
-
-**Desde un archivo `.whl`:**
-```bash
-pip install delinquency_forecast-0.1.0-py3-none-any.whl
 ```
 
 ---
@@ -48,7 +38,7 @@ result = pipeline.predict(
 
 ### Path 2 — features precomputadas
 
-Si el backend ya tiene una tabla de features precomputadas (equivalente al nightly job), el pipeline solo corre E2 → E3. Es más rápido y pensado para el flujo operativo normal.
+Si el backend ya tiene una tabla de features precomputadas, el pipeline solo corre E2 → E3. Es más rápido y pensado para el flujo operativo normal.
 
 ```python
 result = pipeline.predict_from_features(
@@ -89,7 +79,7 @@ Tabla de conteos diarios por celda. El pipeline usa los 30 días previos a `fech
 
 ### `denue` — puntos de interés por celda H3
 
-Tabla estática. Se puede cachear al iniciar el servicio y reutilizar en todas las predicciones.
+Tabla estática.
 
 | Columna | Tipo |
 |---|---|
@@ -107,7 +97,7 @@ Tabla estática. Se puede cachear al iniciar el servicio y reutilizar en todas l
 
 ### `inegi_inv` — infraestructura urbana por celda H3
 
-Tabla estática. Proporciones de infraestructura de calle derivadas del INEGI INV 2020. También se puede cachear.
+Tabla estática. Proporciones de infraestructura de calle derivadas del INEGI INV 2020.
 
 | Columna | Tipo |
 |---|---|
@@ -163,7 +153,7 @@ result = pipeline.predict(
 | `denue` | `h3_index, poi_bancos, ..., poi_total` |
 | `inegi_inv` | `h3_index, inv_banqueta_pct, ..., inv_n_segmentos` |
 
-Si los nombres de tus tablas son distintos, se pueden sobreescribir en el constructor:
+Si los nombres de las tablas son distintos, se pueden sobreescribir en el constructor:
 
 ```python
 loader = PostgresLoader(conn, tables={
@@ -190,12 +180,14 @@ loader = PostgresLoader(conn, tables={
 | `p_robo_confrontacion` | `float64` | Prob. robo con confrontación |
 | `p_robo_patrimonial` | `float64` | Prob. robo patrimonial |
 | `categoria_pred` | `str` | Categoría más probable según threshold ajustado |
-| `nivel_riesgo` | `str` | `"bajo"` / `"medio"` / `"alto"` |
+| `nivel_riesgo` | `str` | `"muy_bajo"` / `"bajo"` / `"medio"` / `"alto"` / `"muy_alto"` |
+| `color_riesgo` | `str` | Color hex asociado al nivel — listo para renderizar en mapa |
 | `confiabilidad_score` | `int64` | 0–100, penaliza fechas fuera del historial real |
 
 ### Aclaraciones
 
-**`nivel_riesgo` es relativo al batch.** Se calcula por percentiles dentro del conjunto de celdas que se pasaron en la consulta. Si pides solo Guadalajara, "alto" significa alto relativo a Guadalajara, no a Jalisco completo.
+**`nivel_riesgo` y `color_riesgo` son relativos al batch.** Se calculan por quintiles de λ dentro del conjunto de celdas que se pasaron en la consulta. Si pides solo Guadalajara, "alto" significa alto relativo a Guadalajara, no a Jalisco completo. La paleta es `#1a9641 → #a6d96a → #ffffbf → #fdae61 → #d7191c` (verde → rojo).
+> TODO: Implementar riesgo relativo al histórico y/o estatal
 
 **Las columnas `p_*` suman 1.0.** Representan la composición de riesgo condicional a que ocurra un crimen — no la probabilidad absoluta de cada tipo. Para la probabilidad absoluta de que ocurra cualquier crimen usa `prob_crimen`.
 

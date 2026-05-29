@@ -47,7 +47,7 @@ class TestPredictOnTheFly:
         assert self.result["categoria_pred"].isin(CLASES).all()
 
     def test_nivel_riesgo_valid(self):
-        assert self.result["nivel_riesgo"].isin(["bajo", "medio", "alto"]).all()
+        assert self.result["nivel_riesgo"].isin(["muy_bajo", "bajo", "medio", "alto", "muy_alto"]).all()
 
     def test_confidence_score_range(self):
         assert self.result["confiabilidad_score"].between(0, 100).all()
