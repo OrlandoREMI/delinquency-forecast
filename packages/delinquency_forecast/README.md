@@ -8,7 +8,7 @@ Pipeline de predicción espaciotemporal de incidencia delictiva para Jalisco. Da
 
 **Desde el repositorio:**
 ```bash
-pip install "git+https://github.com/seigpol/delinquency-forecast.git#subdirectory=packages/delinquency_forecast"
+pip install "git+https://github.com/OrlandoREMI/delinquency-forecast.git#subdirectory=packages/delinquency_forecast"
 ```
 
 ---
