@@ -113,7 +113,8 @@ def build_nearrepeat_by_category(
             continue
 
         pivot = (
-            cat_hist.pivot_table(index="h3_index", columns="fecha", values="conteo", aggfunc="sum")
+            cat_hist.assign(_one=1.0)
+            .pivot_table(index="h3_index", columns="fecha", values="_one", aggfunc="sum")
             .fillna(0.0)
         )
         for w in [7, 14]:

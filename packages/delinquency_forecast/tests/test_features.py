@@ -141,7 +141,7 @@ class TestNearRepeatByCategory:
         assert (result == 0).all().all()
 
     def test_category_specific_count(self):
-        """Solo crímenes de la categoría correcta deben contarse."""
+        """Solo la categoría correcta se cuenta; cada fila aporta 1 (no conteo total)."""
         neighbor = list(h3.grid_ring(_CENTER, 1))[0]
         history = pd.DataFrame({
             "h3_index": [neighbor, neighbor],
@@ -152,8 +152,8 @@ class TestNearRepeatByCategory:
         target = pd.Timestamp("2023-11-23")
         result = build_nearrepeat_by_category([_CENTER], target, history)
 
-        assert result.loc[_CENTER, "nr_cat_alto_ring1_7d"] == 3.0
-        assert result.loc[_CENTER, "nr_cat_patr_ring1_7d"] == 2.0
+        assert result.loc[_CENTER, "nr_cat_alto_ring1_7d"] == 1.0
+        assert result.loc[_CENTER, "nr_cat_patr_ring1_7d"] == 1.0
         assert result.loc[_CENTER, "nr_cat_viol_ring1_7d"] == 0.0
 
 

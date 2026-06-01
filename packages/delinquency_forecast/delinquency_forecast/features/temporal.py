@@ -77,7 +77,7 @@ def build_e1_features(
     tri_arr = pd.Series(str((mes - 1) // 3 + 1), index=idx)
 
     hist_mean_mes = same_month_avg.get(mes, pd.Series(0.0, index=pivot.index)).reindex(idx).fillna(0.0).values
-    hist_max = pivot.max(axis=1).reindex(idx).fillna(0.0).values
+    hist_max = pivot[known_before].max(axis=1).reindex(idx).fillna(0.0).values if known_before else np.zeros(len(h3_indexes))
 
     df = pd.DataFrame(
         {
@@ -141,11 +141,13 @@ def build_e2_temporal(
         return np.zeros(len(h3_indexes))
 
     def roll_mean(n: int) -> np.ndarray:
-        cols = dates_before[-n:] if dates_before else []
+        cutoff = target_date - pd.Timedelta(days=n)
+        cols = [d for d in dates_before if d >= cutoff]
         return pivot[cols].mean(axis=1).values if cols else np.zeros(len(h3_indexes))
 
     def roll_std(n: int) -> np.ndarray:
-        cols = dates_before[-n:] if dates_before else []
+        cutoff = target_date - pd.Timedelta(days=n)
+        cols = [d for d in dates_before if d >= cutoff]
         if len(cols) > 1:
             return pivot[cols].std(axis=1).values
         return np.zeros(len(h3_indexes))
